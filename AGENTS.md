@@ -19,6 +19,7 @@
 - API 키는 서버 메모리/요청 본문 밖으로 내보내지 않는다. `/api/config`는 키 존재 여부(boolean)만 반환한다. 근거: `server/index.ts:147-157`.
 - `.env`는 커밋 금지 (`.gitignore`에 등록됨). 키를 코드·테스트·로그에 하드코딩하거나 출력하지 않는다.
 - Google 호출은 키가 URL 쿼리에 들어간다 (`server/index.ts:99`). 이 URL이나 `fetch` 에러 객체를 `console.log`/응답 본문에 그대로 싣지 않는다.
+- **민감 파일 차단:** `.env`, `.env.*`(`.env.example` 제외), `*credential*`, `*secret*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa*`, `id_ed25519*`, `.npmrc`, `.netrc`, `~/.ssh`, `~/.aws`, `~/.config/gcloud`는 읽기·수정·생성·복사·삭제를 모두 금지한다. `cat`/`type`/`Get-Content`/`grep` 등 셸 우회와 `printenv`/`env`/`Get-ChildItem Env:` 같은 환경변수 덤프도 포함한다. 근거: `.claude/settings.json`의 `permissions.deny`. 이 규칙을 완화하거나 deny 항목을 제거하지 않는다. 키 설정이 필요하면 사용자가 직접 `.env`를 편집하도록 안내한다.
 
 ### Do's & Don'ts
 

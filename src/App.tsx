@@ -19,8 +19,16 @@ function App() {
     anthropic: false,
     google: false,
   });
-  const { components, history, isLoading, error, generate, removeComponent, clearAll } =
-    useComponentGenerator();
+  const {
+    components,
+    streamingComponent,
+    history,
+    isLoading,
+    error,
+    generate,
+    removeComponent,
+    clearAll,
+  } = useComponentGenerator();
 
   useEffect(() => {
     fetch('/api/config')
@@ -153,7 +161,7 @@ function App() {
             </div>
           )}
 
-          {components.length === 0 && !isLoading && (
+          {components.length === 0 && !streamingComponent && (
             <div className="window empty-state">
               <div className="titlebar">
                 <span className="close-box" aria-hidden="true" />
@@ -183,22 +191,18 @@ function App() {
             </div>
           )}
 
-          {isLoading && (
-            <div className="window loading-card" role="status">
-              <div className="titlebar">
-                <span className="close-box" aria-hidden="true" />
-                <h2>생성 중</h2>
-              </div>
-              <div className="loading-body">
-                <p>컴포넌트를 생성하고 있습니다...</p>
-                <div className="progress" aria-hidden="true">
-                  <div className="progress-bar" />
-                </div>
-              </div>
-            </div>
-          )}
-
           <div className="results-grid">
+            {/* 생성 중인 카드와 완료된 카드는 같은 key를 써서 탭 상태가 이어진다. */}
+            {streamingComponent && (
+              <ComponentCard
+                key={streamingComponent.id}
+                component={streamingComponent}
+                onRemove={removeComponent}
+                onRegenerate={handleGenerate}
+                isLoading={isLoading}
+                isStreaming
+              />
+            )}
             {components.map((component) => (
               <ComponentCard
                 key={component.id}
