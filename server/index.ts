@@ -1,5 +1,6 @@
 import { stripCodeFences, ensureRenderCall } from './generator';
 import { withModelFallback } from './fallback';
+import { createSSEParser, extractAnthropicDelta, extractGoogleDelta } from './stream';
 
 // 우선순위 순서. 앞 모델이 실패하면 다음 모델로 폴백한다.
 const GOOGLE_MODELS = ['gemini-3.1-flash-lite', 'gemini-3.5-flash'];
@@ -135,6 +136,131 @@ async function callGoogle(prompt: string, apiKey: string): Promise<string> {
   return withModelFallback(GOOGLE_MODELS, (model) => callGoogleModel(prompt, apiKey, model));
 }
 
+// 업스트림 SSE 응답 본문을 읽어 텍스트 조각(delta)을 순서대로 내보낸다.
+async function* readDeltas(
+  response: Response,
+  extract: (data: string) => { text: string; truncated?: boolean },
+): AsyncGenerator<string> {
+  if (!response.body) {
+    throw new Error('스트리밍 응답 본문이 비어 있습니다.');
+  }
+
+  const feed = createSSEParser();
+  const decoder = new TextDecoder();
+
+  for await (const chunk of response.body) {
+    for (const data of feed(decoder.decode(chunk, { stream: true }))) {
+      const { text, truncated } = extract(data);
+      if (text) yield text;
+      if (truncated) {
+        throw new Error('생성된 코드가 너무 길어 잘렸습니다. 더 간단한 컴포넌트를 요청해주세요.');
+      }
+    }
+  }
+}
+
+async function streamAnthropic(prompt: string, apiKey: string): Promise<AsyncGenerator<string>> {
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 4096,
+      stream: true,
+      system: SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: prompt }],
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Claude API error: ${response.status}`);
+  }
+
+  return readDeltas(response, (data) => ({ text: extractAnthropicDelta(data) }));
+}
+
+async function streamGoogleModel(
+  prompt: string,
+  apiKey: string,
+  model: string,
+): Promise<AsyncGenerator<string>> {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${apiKey}`;
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: { maxOutputTokens: 8192 },
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Gemini API error: ${response.status}`);
+  }
+
+  return readDeltas(response, extractGoogleDelta);
+}
+
+// 모델 폴백은 스트림을 연 시점(응답 헤더)까지만 적용된다. 스트림 도중 실패는 폴백하지 않는다.
+async function streamGoogle(prompt: string, apiKey: string): Promise<AsyncGenerator<string>> {
+  return withModelFallback(GOOGLE_MODELS, (model) => streamGoogleModel(prompt, apiKey, model));
+}
+
+function errorResponse(err: unknown): Response {
+  const message = err instanceof Error ? err.message : 'Unknown error';
+
+  if (message.includes('503')) {
+    return Response.json(
+      { error: 'API 서버가 일시적으로 과부하 상태입니다. 잠시 후 다시 시도해주세요.' },
+      { status: 503, headers: CORS_HEADERS }
+    );
+  }
+
+  if (message.includes('429')) {
+    return Response.json(
+      { error: '요청이 너무 많습니다. 잠시 후 다시 시도해주세요.' },
+      { status: 429, headers: CORS_HEADERS }
+    );
+  }
+
+  return Response.json({ error: message }, { status: 500, headers: CORS_HEADERS });
+}
+
+// 줄 단위 JSON(NDJSON)으로 { type: 'delta' | 'done' | 'error' } 이벤트를 내려준다.
+function streamResponse(deltas: AsyncGenerator<string>): Response {
+  const encoder = new TextEncoder();
+
+  const body = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const send = (event: object) =>
+        controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+
+      try {
+        let text = '';
+        for await (const delta of deltas) {
+          text += delta;
+          send({ type: 'delta', code: stripCodeFences(text) });
+        }
+        send({ type: 'done', code: ensureRenderCall(stripCodeFences(text)) });
+      } catch (err) {
+        send({ type: 'error', error: err instanceof Error ? err.message : 'Unknown error' });
+      } finally {
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(body, {
+    headers: { ...CORS_HEADERS, 'Content-Type': 'application/x-ndjson; charset=utf-8' },
+  });
+}
+
 const server = Bun.serve({
   port: 3002,
   async fetch(req) {
@@ -189,26 +315,42 @@ const server = Bun.serve({
 
         return Response.json({ code }, { headers: CORS_HEADERS });
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Unknown error';
+        return errorResponse(err);
+      }
+    }
 
-        if (message.includes('503')) {
+    if (req.method === 'POST' && url.pathname === '/api/generate/stream') {
+      try {
+        const { prompt, apiKey, provider = 'anthropic' } = (await req.json()) as {
+          prompt: string;
+          apiKey?: string;
+          provider?: Provider;
+        };
+
+        const resolvedKey = resolveApiKey(provider, apiKey);
+
+        if (!resolvedKey) {
           return Response.json(
-            { error: 'API 서버가 일시적으로 과부하 상태입니다. 잠시 후 다시 시도해주세요.' },
-            { status: 503, headers: CORS_HEADERS }
+            { error: `API key is required. Set ${provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'GOOGLE_API_KEY'} in .env or enter it manually.` },
+            { status: 400, headers: CORS_HEADERS }
           );
         }
 
-        if (message.includes('429')) {
+        if (!prompt) {
           return Response.json(
-            { error: '요청이 너무 많습니다. 잠시 후 다시 시도해주세요.' },
-            { status: 429, headers: CORS_HEADERS }
+            { error: 'Prompt is required' },
+            { status: 400, headers: CORS_HEADERS }
           );
         }
 
-        return Response.json(
-          { error: message },
-          { status: 500, headers: CORS_HEADERS }
-        );
+        const deltas =
+          provider === 'google'
+            ? await streamGoogle(prompt, resolvedKey)
+            : await streamAnthropic(prompt, resolvedKey);
+
+        return streamResponse(deltas);
+      } catch (err) {
+        return errorResponse(err);
       }
     }
 

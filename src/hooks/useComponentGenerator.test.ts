@@ -3,10 +3,26 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { STORAGE_KEYS } from '../utils/storage';
 import { useComponentGenerator } from './useComponentGenerator';
 
+function streamBody(events: object[]): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  return new ReadableStream({
+    start(controller) {
+      for (const event of events) controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+      controller.close();
+    },
+  });
+}
+
 function mockFetchOk(code = 'render(<div />)') {
   vi.stubGlobal(
     'fetch',
-    vi.fn().mockResolvedValue({ ok: true, json: async () => ({ code }) }),
+    vi.fn().mockImplementation(async () => ({
+      ok: true,
+      body: streamBody([
+        { type: 'delta', code: 'partial' },
+        { type: 'done', code },
+      ]),
+    })),
   );
 }
 
@@ -58,6 +74,33 @@ describe('useComponentGenerator 영속화', () => {
       '둘째',
       '첫째',
     ]);
+  });
+
+  it('생성이 끝나면 스트리밍 중 컴포넌트는 비워지고 목록에는 최종 코드가 들어간다', async () => {
+    mockFetchOk('render(<i />)');
+    const { result } = renderHook(() => useComponentGenerator());
+
+    await act(() => result.current.generate('카드', undefined, 'google'));
+
+    expect(result.current.streamingComponent).toBeNull();
+    expect(result.current.components[0].code).toBe('render(<i />)');
+  });
+
+  it('스트림 도중 에러 이벤트를 받으면 에러 상태가 되고 목록은 그대로다', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async () => ({
+        ok: true,
+        body: streamBody([{ type: 'error', error: '잘렸습니다' }]),
+      })),
+    );
+    const { result } = renderHook(() => useComponentGenerator());
+
+    await act(() => result.current.generate('카드', undefined, 'google'));
+
+    expect(result.current.error).toBe('잘렸습니다');
+    expect(result.current.components).toEqual([]);
+    expect(result.current.streamingComponent).toBeNull();
   });
 
   it('생성에 실패하면 프롬프트를 히스토리에 추가하지 않는다', async () => {
