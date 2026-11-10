@@ -728,3 +728,12 @@
     padding: 18px;
   }
 }
+
+.prompt-error {
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: var(--danger-soft);
+  border: 2px solid var(--ink);
+  color: var(--danger);
+  font-size: 14px;
+}
