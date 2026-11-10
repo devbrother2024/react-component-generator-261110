@@ -1,0 +1,77 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+:root {
+  color-scheme: light;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+
+  --font-ui: 'Galmuri11', 'Galmuri9', 'Malgun Gothic', 'Apple SD Gothic Neo', system-ui, sans-serif;
+  --font-code: 'GalmuriMono11', 'GalmuriMono9', 'D2Coding', Consolas, monospace;
+
+  --desk: #4658c9;
+  --desk-dark: #3c4cb6;
+  --ink: #16163a;
+  --platinum: #dcdce4;
+  --platinum-dark: #9a9aaa;
+  --platinum-deep: #c3c3d0;
+  --paper: #fbfbff;
+  --amber: #ffc21a;
+  --amber-deep: #d99e00;
+  --amber-soft: #fff0b8;
+  --success: #12794a;
+  --danger: #d6343b;
+  --danger-soft: #ffe3e4;
+}
+
+body {
+  min-height: 100vh;
+  font-family: var(--font-ui);
+  font-size: 15px;
+  line-height: 1.6;
+  background-color: var(--desk);
+  /* 50% 체커 디더링: 90년대 바탕화면 패턴 */
+  background-image: conic-gradient(
+    var(--desk-dark) 25%,
+    transparent 0 50%,
+    var(--desk-dark) 0 75%,
+    transparent 0
+  );
+  background-size: 4px 4px;
+  color: var(--ink);
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  -webkit-tap-highlight-color: transparent;
+}
+
+:focus-visible {
+  outline: 2px dashed var(--ink);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 2px var(--amber);
+}
+
+::selection {
+  background: var(--ink);
+  color: var(--amber);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
