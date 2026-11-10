@@ -1,6 +1,12 @@
 import { stripCodeFences, ensureRenderCall } from './generator';
 import { withModelFallback } from './fallback';
-import { createSSEParser, extractAnthropicDelta, extractGoogleDelta } from './stream';
+import {
+  SafeStreamError,
+  createGenerateStream,
+  createSSEParser,
+  extractAnthropicDelta,
+  extractGoogleDelta,
+} from './stream';
 
 // 우선순위 순서. 앞 모델이 실패하면 다음 모델로 폴백한다.
 const GOOGLE_MODELS = ['gemini-3.1-flash-lite', 'gemini-3.5-flash'];
@@ -142,7 +148,7 @@ async function* readDeltas(
   extract: (data: string) => { text: string; truncated?: boolean },
 ): AsyncGenerator<string> {
   if (!response.body) {
-    throw new Error('스트리밍 응답 본문이 비어 있습니다.');
+    throw new SafeStreamError('스트리밍 응답 본문이 비어 있습니다.');
   }
 
   const feed = createSSEParser();
@@ -153,15 +159,20 @@ async function* readDeltas(
       const { text, truncated } = extract(data);
       if (text) yield text;
       if (truncated) {
-        throw new Error('생성된 코드가 너무 길어 잘렸습니다. 더 간단한 컴포넌트를 요청해주세요.');
+        throw new SafeStreamError('생성된 코드가 너무 길어 잘렸습니다. 더 간단한 컴포넌트를 요청해주세요.');
       }
     }
   }
 }
 
-async function streamAnthropic(prompt: string, apiKey: string): Promise<AsyncGenerator<string>> {
+async function streamAnthropic(
+  prompt: string,
+  apiKey: string,
+  signal: AbortSignal,
+): Promise<AsyncGenerator<string>> {
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
+    signal,
     headers: {
       'Content-Type': 'application/json',
       'x-api-key': apiKey,
@@ -187,11 +198,13 @@ async function streamGoogleModel(
   prompt: string,
   apiKey: string,
   model: string,
+  signal: AbortSignal,
 ): Promise<AsyncGenerator<string>> {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${apiKey}`;
 
   const response = await fetch(url, {
     method: 'POST',
+    signal,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
@@ -208,8 +221,14 @@ async function streamGoogleModel(
 }
 
 // 모델 폴백은 스트림을 연 시점(응답 헤더)까지만 적용된다. 스트림 도중 실패는 폴백하지 않는다.
-async function streamGoogle(prompt: string, apiKey: string): Promise<AsyncGenerator<string>> {
-  return withModelFallback(GOOGLE_MODELS, (model) => streamGoogleModel(prompt, apiKey, model));
+async function streamGoogle(
+  prompt: string,
+  apiKey: string,
+  signal: AbortSignal,
+): Promise<AsyncGenerator<string>> {
+  return withModelFallback(GOOGLE_MODELS, (model) =>
+    streamGoogleModel(prompt, apiKey, model, signal),
+  );
 }
 
 function errorResponse(err: unknown): Response {
@@ -232,31 +251,8 @@ function errorResponse(err: unknown): Response {
   return Response.json({ error: message }, { status: 500, headers: CORS_HEADERS });
 }
 
-// 줄 단위 JSON(NDJSON)으로 { type: 'delta' | 'done' | 'error' } 이벤트를 내려준다.
-function streamResponse(deltas: AsyncGenerator<string>): Response {
-  const encoder = new TextEncoder();
-
-  const body = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      const send = (event: object) =>
-        controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
-
-      try {
-        let text = '';
-        for await (const delta of deltas) {
-          text += delta;
-          send({ type: 'delta', code: stripCodeFences(text) });
-        }
-        send({ type: 'done', code: ensureRenderCall(stripCodeFences(text)) });
-      } catch (err) {
-        send({ type: 'error', error: err instanceof Error ? err.message : 'Unknown error' });
-      } finally {
-        controller.close();
-      }
-    },
-  });
-
-  return new Response(body, {
+function streamResponse(deltas: AsyncGenerator<string>, abort: () => void): Response {
+  return new Response(createGenerateStream(deltas, abort), {
     headers: { ...CORS_HEADERS, 'Content-Type': 'application/x-ndjson; charset=utf-8' },
   });
 }
@@ -343,12 +339,14 @@ const server = Bun.serve({
           );
         }
 
+        // 클라이언트가 연결을 끊으면 업스트림 요청도 취소한다.
+        const upstream = new AbortController();
         const deltas =
           provider === 'google'
-            ? await streamGoogle(prompt, resolvedKey)
-            : await streamAnthropic(prompt, resolvedKey);
+            ? await streamGoogle(prompt, resolvedKey, upstream.signal)
+            : await streamAnthropic(prompt, resolvedKey, upstream.signal);
 
-        return streamResponse(deltas);
+        return streamResponse(deltas, () => upstream.abort());
       } catch (err) {
         return errorResponse(err);
       }
