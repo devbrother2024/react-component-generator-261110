@@ -3,6 +3,7 @@ import { PromptInput } from './components/PromptInput';
 import { ComponentCard } from './components/ComponentCard';
 import { useComponentGenerator } from './hooks/useComponentGenerator';
 import type { Provider } from './types';
+import { loadProvider, saveProvider } from './utils/storage';
 import './App.css';
 
 const PROVIDER_CONFIG = {
@@ -13,12 +14,12 @@ const PROVIDER_CONFIG = {
 function App() {
   const [apiKey, setApiKey] = useState('');
   const [showKey, setShowKey] = useState(false);
-  const [provider, setProvider] = useState<Provider>('google');
+  const [provider, setProvider] = useState<Provider>(loadProvider);
   const [envKeys, setEnvKeys] = useState<Record<Provider, boolean>>({
     anthropic: false,
     google: false,
   });
-  const { components, isLoading, error, generate, removeComponent, clearAll } =
+  const { components, history, isLoading, error, generate, removeComponent, clearAll } =
     useComponentGenerator();
 
   useEffect(() => {
@@ -40,6 +41,7 @@ function App() {
 
   const handleProviderChange = (newProvider: Provider) => {
     setProvider(newProvider);
+    saveProvider(newProvider);
     setApiKey('');
   };
 
@@ -79,7 +81,7 @@ function App() {
               <h2 id="composer-title">무엇을 만들까요?</h2>
             </div>
             <div className="window-body">
-              <PromptInput onGenerate={handleGenerate} isLoading={isLoading} />
+              <PromptInput onGenerate={handleGenerate} isLoading={isLoading} history={history} />
             </div>
           </section>
 
